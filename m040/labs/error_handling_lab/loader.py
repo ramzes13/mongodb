@@ -45,11 +45,13 @@ def handle_commit(s):
     Handles the commit operation.
     """
     # LAB - needs error handling
-    try:
-        s.commit_transaction()
-    except Exception as exc:
-        # do something here
-        raise
+    while True:
+        try:
+            s.commit_transaction()
+            break
+        except (pymongo.errors.OperationFailure, pymongo.errors.ConnectionFailure) as exc:
+            print("Commit error: {} retrying commit ... ".format(exc))
+            continue
 
 
 def write_batch(batch, mc, s):
@@ -61,15 +63,16 @@ def write_batch(batch, mc, s):
         result = mc.m040.cities.insert_many(batch, session=s)
         batch_total_population = sum(d['population'] for d in batch)
         mc.m040.city_stats.update_one({'_id': 'loader'},
-            {"$inc": {"population_total": batch_total_population}},
-            session=s
-        )
+                                      {"$inc": {
+                                          "population_total": batch_total_population}},
+                                      session=s
+                                      )
         handle_commit(s)
     except (pymongo.errors.DuplicateKeyError) as dupex:
         print("Duplicate Key Found: {}".format(dupex))
         s.abort_transaction()
-        return(0,0)
-    return (batch_total_population,len(result.inserted_ids))
+        return(0, 0)
+    return (batch_total_population, len(result.inserted_ids))
 
 
 def load_data(q, batch, uri):
@@ -82,14 +85,18 @@ def load_data(q, batch, uri):
     try:
         # LAB - needs error handling
         with mc.start_session() as s:
-            try:
-                batch_total_population,batch_docs = write_batch(batch, mc, s)
-            except Exception as exc:
-                # Do something here!
-                print("Error - what shall I do ??!??! {}".format(exc))
-                raise
+            # LAB - needs error handling
+            while True:
+                try:
+                    batch_total_population, batch_docs = write_batch(
+                        batch, mc, s)
+                    break
+                except (pymongo.errors.OperationFailure, pymongo.errors.ConnectionFailure) as exc:
+                    print("Error detected: {} - retrying".format(exc))
+                    s.abort_transaction()
+                    continue
 
-            q.put({"batch_pop": batch_total_population, "batch_docs": batch_docs })
+            q.put({"batch_pop": batch_total_population, "batch_docs": batch_docs})
 
     except Exception as e:
         print("Unexpected error found: {}".format(e))
@@ -119,12 +126,12 @@ def main(arguments):
     # Process list
     processes = []
 
-    #import dataset in batches
+    # import dataset in batches
     batch_size = 10
     with open(arguments['--file'], 'rt') as fd:
-        for slice in iter(lambda: tuple(islice(fd, batch_size)),()):
+        for slice in iter(lambda: tuple(islice(fd, batch_size)), ()):
             batch = list(map(json.loads, slice))
-            processes.append( Process(target=load_data, args=(q, batch, uri)) )
+            processes.append(Process(target=load_data, args=(q, batch, uri)))
 
     for p in processes:
         p.start()
